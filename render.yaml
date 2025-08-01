@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: hackrx-api
+    env: python
+    buildCommand: ""
+    startCommand: python hackrx_gemini_api.py
+    envVars:
+      - key: GEMINI_API_KEY
+        value: AIzaSyDAsTHWbzl6uk6CmNU2kUTNaln-Mp6JY0s
+      - key: HACKRX_API_KEY
+        value: hackrx123
