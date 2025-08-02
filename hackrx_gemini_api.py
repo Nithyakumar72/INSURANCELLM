@@ -1,76 +1,90 @@
-# hackrx_gemini_api.py
-
-import os
-import fitz  # PyMuPDF
-import json
 from flask import Flask, request, jsonify
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceBgeEmbeddings
-from langchain_community.vectorstores import FAISS
+import requests
+import fitz  # PyMuPDF
 import google.generativeai as genai
-
-# Setup Gemini with your actual API key
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))  # Set this in Render's environment variables
-model = genai.GenerativeModel("models/gemini-1.5-flash")
+import os
+import time
 
 app = Flask(__name__)
-PDF_PATH = "BAJHLIP23020V012223.pdf"  # Place this in your Render project root
 
-# Step 1: Load PDF and Build FAISS Index
-def load_and_index_pdf(pdf_path):
-    doc = fitz.open(pdf_path)
-    full_text = "\n".join([page.get_text() for page in doc])
-    doc.close()
+# Configure Gemini API
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    chunks = splitter.split_text(full_text)
+# Initialize Gemini model
+gemini_model = genai.GenerativeModel("models/gemini-2.0-flash")
 
-    embeddings = HuggingFaceBgeEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-    db = FAISS.from_texts(chunks, embeddings)
-    return db
+@app.route('/hackrx/run', methods=['POST'])
+def run():
+    try:
+        # Check Authorization header
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return jsonify({'error': 'Missing or invalid Authorization header'}), 401
 
-db = load_and_index_pdf(PDF_PATH)
+        data = request.get_json()
+        pdf_url = data.get("documents")
+        questions = data.get("questions", [])
 
-# Step 2: Define /hackrx/run Endpoint
-@app.route("/hackrx/run", methods=["POST"])
-def hackrx_run():
-    if request.headers.get("Authorization") != f"Bearer {os.getenv('HACKRX_API_KEY')}":
-        return jsonify({"error": "Unauthorized"}), 401
+        if not pdf_url or not questions:
+            return jsonify({'error': 'Missing PDF URL or questions'}), 400
 
-    data = request.get_json()
-    questions = data.get("questions", [])
-    answers = []
+        # Download the PDF
+        pdf_response = requests.get(pdf_url, timeout=15)
+        if pdf_response.status_code != 200:
+            return jsonify({'error': f'Failed to download PDF from URL: {pdf_url}'}), 400
 
-    for question in questions:
-        docs = db.similarity_search(question, k=3)
-        context = "\n\n".join([doc.page_content for doc in docs])
-        prompt = f"""
-You are a healthcare policy expert helping users understand their insurance documents.
+        with open("temp.pdf", "wb") as f:
+            f.write(pdf_response.content)
 
-Context:
-{context}
+        # Extract text safely using PyMuPDF
+        doc = fitz.open("temp.pdf")
+        full_text = ""
+        for i in range(len(doc)):
+            try:
+                page = doc.load_page(i)
+                full_text += page.get_text()
+            except Exception as e:
+                print(f"Warning: Skipped page {i} due to error: {e}")
+        doc.close()
 
-Question:
+        if not full_text.strip():
+            return jsonify({'error': 'No text extracted from PDF'}), 400
+
+        # Start response timer
+        start_time = time.time()
+
+        # Generate answers
+        answers = []
+        for question in questions:
+            prompt = f"""
+You are a smart insurance assistant. Based only on the insurance policy document below, give a direct, short answer (1–2 lines) to the question, written in simple, understandable language. Avoid legal wording and long definitions.
+
+---DOCUMENT---
+{full_text}
+
+---QUESTION---
 {question}
 
-Instructions:
-- Provide a clear, concise answer.
-- If the information is not available in the context, say "Not specified in the document."
-- Avoid assumptions or generalizations.
-- Keep the answer within 1-2 sentences.
-- Respond only with the answer to the question.
+---ANSWER---"""
+            try:
+                result = gemini_model.generate_content(prompt)
+                answer = result.text.strip()
+            except Exception as e:
+                answer = f"Error: {str(e)}"
+            answers.append(answer)
 
-Answer:"""
+        total_time = round(time.time() - start_time, 2)
 
-        
-        try:
-            response = model.generate_content(prompt)
-            answers.append(response.text.strip())
-        except Exception as e:
-            answers.append(f"Error: {str(e)}")
+        return jsonify({
+            "answers": answers,
+            "total_response_time_sec": total_time
+        })
 
-    return jsonify({"answers": answers})
+    except Exception as e:
+        return jsonify({'error': f"Server error: {str(e)}"}), 500
 
-# Run locally (for debugging only)
+# Required for Render
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
+
