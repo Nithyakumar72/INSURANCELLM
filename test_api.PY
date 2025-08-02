@@ -21,7 +21,8 @@ data = {
     ]
 }
 
-res = requests.post("https://test1-mqan.onrender.com/hackrx/run", json=data, headers=headers)
+res = requests.post("https://insurancellm-bund.onrender.com/hackrx/run", json=data, headers=headers)
 print("Status:", res.status_code)
 print("Response:", res.json())
+
 
