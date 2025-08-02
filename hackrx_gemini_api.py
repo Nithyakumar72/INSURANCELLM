@@ -3,20 +3,21 @@ import requests
 import fitz  # PyMuPDF
 import google.generativeai as genai
 import os
-import time  # 👈 Add this
+import time  # <--- added
 
 app = Flask(__name__)
 
 # Configure Gemini API
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Initialize Gemini model
 gemini_model = genai.GenerativeModel("models/gemini-2.0-flash")
 
 @app.route('/hackrx/run', methods=['POST'])
 def run():
-    start_time = time.time()  # ⏱️ Start timer
-
     try:
-        # Authorization header
+        start_time = time.time()  # <--- start timing
+
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith("Bearer "):
             return jsonify({'error': 'Missing or invalid Authorization header'}), 401
@@ -36,7 +37,7 @@ def run():
         with open("temp.pdf", "wb") as f:
             f.write(pdf_response.content)
 
-        # Extract text using PyMuPDF
+        # Extract text from PDF
         doc = fitz.open("temp.pdf")
         full_text = ""
         for i in range(len(doc)):
@@ -70,11 +71,11 @@ You are a smart insurance assistant. Based only on the insurance policy document
                 answer = f"Error: {str(e)}"
             answers.append(answer)
 
-        response_time = round(time.time() - start_time, 2)  # ⏱️ End timer
+        total_time = round(time.time() - start_time, 2)  # <--- end timing
 
         return jsonify({
             "answers": answers,
-            "response_time_seconds": response_time
+            "response_time_seconds": total_time  # <--- include response time
         })
 
     except Exception as e:
@@ -82,3 +83,4 @@ You are a smart insurance assistant. Based only on the insurance policy document
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
