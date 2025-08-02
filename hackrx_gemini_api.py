@@ -3,7 +3,7 @@ import requests
 import fitz  # PyMuPDF
 import google.generativeai as genai
 import os
-import time
+
 
 app = Flask(__name__)
 
@@ -50,8 +50,7 @@ def run():
         if not full_text.strip():
             return jsonify({'error': 'No text extracted from PDF'}), 400
 
-        # Start response timer
-        start_time = time.time()
+        
 
         # Generate answers
         answers = []
@@ -73,11 +72,11 @@ You are a smart insurance assistant. Based only on the insurance policy document
                 answer = f"Error: {str(e)}"
             answers.append(answer)
 
-        total_time = round(time.time() - start_time, 2)
+       
 
         return jsonify({
             "answers": answers,
-            "total_response_time_sec": total_time
+            
         })
 
     except Exception as e:
@@ -86,6 +85,9 @@ You are a smart insurance assistant. Based only on the insurance policy document
 # Required for Render
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
+
+
 
 
 
