@@ -1,86 +1,114 @@
 from flask import Flask, request, jsonify
+from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer
+import faiss
 import requests
-import fitz  # PyMuPDF
 import google.generativeai as genai
+import numpy as np
+import tempfile
 import os
-import time  # <--- added
 
 app = Flask(__name__)
 
+# Initialize embedding model
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
 # Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+genai.configure(api_key="YOUR_GEMINI_API_KEY")  # <-- Replace with actual key
+gemini_model = genai.GenerativeModel("gemini-pro")
 
-# Initialize Gemini model
-gemini_model = genai.GenerativeModel("models/gemini-2.0-flash")
+# Utility: Split document into word chunks
+def chunk_text(text, chunk_size=300):
+    words = text.split()
+    return [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
-@app.route('/hackrx/run', methods=['POST'])
-def run():
+# Extract text from PDF (given URL)
+def extract_text_from_pdf_url(pdf_url):
     try:
-        start_time = time.time()  # <--- start timing
+        response = requests.get(pdf_url, timeout=10)
+        response.raise_for_status()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(response.content)
+            tmp_path = tmp_file.name
+        reader = PdfReader(tmp_path)
+        text = ""
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text
+        os.unlink(tmp_path)
+        return text.strip()
+    except Exception as e:
+        return None
 
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return jsonify({'error': 'Missing or invalid Authorization header'}), 401
+# Create FAISS index of embedded chunks
+def create_faiss_index(chunks):
+    embeddings = model.encode(chunks)
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(np.array(embeddings).astype('float32'))
+    return index, embeddings
 
-        data = request.get_json()
-        pdf_url = data.get("documents")
-        questions = data.get("questions", [])
+# Retrieve top K relevant chunks from index
+def get_top_k_chunks(query, chunks, embeddings, index, k=1):
+    query_vec = model.encode([query]).astype('float32')
+    D, I = index.search(query_vec, k)
+    return [chunks[i] for i in I[0]]
 
-        if not pdf_url or not questions:
-            return jsonify({'error': 'Missing PDF URL or questions'}), 400
+# Ask Gemini using the top matched clause
+def ask_gemini(question, context):
+    prompt = f"""
+Answer the following insurance-related question based ONLY on the provided context below. Respond in 1–2 short sentences. If not found, reply 'Not mentioned'.
 
-        # Download the PDF
-        pdf_response = requests.get(pdf_url, timeout=15)
-        if pdf_response.status_code != 200:
-            return jsonify({'error': f'Failed to download PDF from URL: {pdf_url}'}), 400
+Context:
+\"\"\"
+{context}
+\"\"\"
 
-        with open("temp.pdf", "wb") as f:
-            f.write(pdf_response.content)
-
-        # Extract text from PDF
-        doc = fitz.open("temp.pdf")
-        full_text = ""
-        for i in range(len(doc)):
-            try:
-                page = doc.load_page(i)
-                full_text += page.get_text()
-            except Exception as e:
-                print(f"Warning: Skipped page {i} due to error: {e}")
-        doc.close()
-
-        if not full_text.strip():
-            return jsonify({'error': 'No text extracted from PDF'}), 400
-
-        # Generate answers
-        answers = []
-        for question in questions:
-            prompt = f"""
-You are a smart insurance assistant. Based only on the insurance policy document below, give a direct, short answer (1–2 lines) to the question, written in simple, understandable language. Avoid legal wording and long definitions.
-
----DOCUMENT---
-{full_text}
-
----QUESTION---
+Question:
 {question}
 
----ANSWER---"""
-            try:
-                result = gemini_model.generate_content(prompt)
-                answer = result.text.strip()
-            except Exception as e:
-                answer = f"Error: {str(e)}"
-            answers.append(answer)
+Answer:
+"""
+    try:
+        response = gemini_model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        return "Error: " + str(e)
 
-        total_time = round(time.time() - start_time, 2)  # <--- end timing
+# Main HackRx endpoint
+@app.route('/hackrx/run', methods=['POST'])
+def run_hackrx():
+    data = request.get_json()
+    pdf_url = data.get('pdf_url') or data.get('documents')  # Accept both keys
+    questions = data.get('questions')
 
-        return jsonify({
-            "answers": answers,
-            "response_time_seconds": total_time  # <--- include response time
+    if not pdf_url or not questions:
+        return jsonify({"error": "Missing pdf_url/documents or questions"}), 400
+
+    # Step 1: Extract and chunk PDF text
+    full_text = extract_text_from_pdf_url(pdf_url)
+    if not full_text:
+        return jsonify({"error": "Failed to extract PDF text"}), 400
+
+    chunks = chunk_text(full_text)
+    index, embeddings = create_faiss_index(chunks)
+
+    # Step 2: Answer questions
+    results = []
+    for question in questions:
+        top_chunks = get_top_k_chunks(question, chunks, embeddings, index, k=1)
+        matched_chunk = top_chunks[0] if top_chunks else ""
+        answer = ask_gemini(question, matched_chunk)
+        results.append({
+            "question": question,
+            "answer": answer,
+            "matched_clause": matched_chunk
         })
 
-    except Exception as e:
-        return jsonify({'error': f"Server error: {str(e)}"}), 500
+    return jsonify({"answers": results})
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
 
