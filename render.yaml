@@ -2,13 +2,13 @@ services:
   - type: web
     name: hackrx-api
     env: python
-    region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: python hackrx_gemini_api.py
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn hackrx_gemini_api:app --host 0.0.0.0 --port 10000"
     envVars:
       - key: GEMINI_API_KEY
         value: AIzaSyDAsTHWbzl6uk6CmNU2kUTNaln-Mp6JY0s
       - key: HACKRX_API_KEY
         value: d464d88731074c5923019b6139916b4ba2e7cd1b8cb01316fed78295b75c066e
+
 
 
