@@ -1,117 +1,117 @@
 from flask import Flask, request, jsonify
-from PyPDF2 import PdfReader
+import os
+import requests
+import PyPDF2
+import numpy as np
+import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
 import faiss
-import requests
-import google.generativeai as genai
-import numpy as np
-import tempfile
-import os
+import time
 
-# Initialize Flask app
 app = Flask(__name__)
 
-# ✅ Directly set Gemini API Key (NOT RECOMMENDED for production)
-GEMINI_API_KEY = "AIzaSyCOxSvEYOT3eQaCT21SFwcK-3klYPf_KnI"
-
-# Configure Gemini
+# Load Gemini API key
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not set in environment")
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-pro")
 
-# Load embedding model
-model = SentenceTransformer('all-MiniLM-L6-v2')
+# Load Gemini model
+gemini_model = genai.GenerativeModel("models/gemini-pro")
 
-# Chunking utility
-def chunk_text(text, chunk_size=300):
-    words = text.split()
-    return [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
+# Load SentenceTransformer model
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Extract text from PDF URL
-def extract_text_from_pdf_url(pdf_url):
-    try:
-        response = requests.get(pdf_url, timeout=10)
-        response.raise_for_status()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(response.content)
-            tmp_path = tmp_file.name
-        reader = PdfReader(tmp_path)
-        text = ""
+
+def extract_clauses_from_pdf(pdf_path):
+    text = ""
+    with open(pdf_path, "rb") as f:
+        reader = PyPDF2.PdfReader(f)
         for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text
-        os.unlink(tmp_path)
-        return text.strip()
-    except Exception as e:
-        print(f"Error extracting PDF: {e}")
-        return None
+            text += page.extract_text() or ""
+    clauses = [line.strip() for line in text.split('\n') if line.strip()]
+    return clauses
 
-# Create FAISS index
-def create_faiss_index(chunks):
-    embeddings = model.encode(chunks)
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
-    index.add(np.array(embeddings).astype('float32'))
-    return index, embeddings
 
-# Retrieve top matching chunks
-def get_top_k_chunks(query, chunks, embeddings, index, k=1):
-    query_vec = model.encode([query]).astype('float32')
-    D, I = index.search(query_vec, k)
-    return [chunks[i] for i in I[0]]
+def create_faiss_index(clauses):
+    embeddings = embedding_model.encode(clauses)
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(np.array(embeddings))
+    return index
 
-# Ask Gemini with relevant clause
-def ask_gemini(question, context):
-    prompt = f"""
-Answer the following insurance-related question using ONLY the context provided. Respond in 1–2 clear sentences. If not found, say "Not mentioned".
 
-Context:
-\"\"\"
-{context}
-\"\"\"
+def get_top_k_clauses(question, clauses, index, k=3):
+    question_embedding = embedding_model.encode([question])
+    _, I = index.search(np.array(question_embedding), k)
+    return [clauses[i] for i in I[0]]
 
-Question:
+
+@app.route("/hackrx/run", methods=["POST"])
+def run():
+    try:
+        start_time = time.time()
+
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return jsonify({'error': 'Missing or invalid Authorization header'}), 401
+
+        user_api_key = auth_header.replace("Bearer ", "").strip()
+        valid_api_key = os.getenv("HACKRX_API_KEY", "d464d88731074c5923019b6139916b4ba2e7cd1b8cb01316fed78295b75c066e")
+        if user_api_key != valid_api_key:
+            return jsonify({'error': 'Unauthorized API key'}), 403
+
+        data = request.get_json()
+        pdf_url = data.get("documents")
+        questions = data.get("questions", [])
+
+        if not pdf_url or not questions:
+            return jsonify({'error': 'Missing PDF URL or questions'}), 400
+
+        pdf_response = requests.get(pdf_url, timeout=20)
+        if pdf_response.status_code != 200:
+            return jsonify({'error': f'Failed to download PDF from {pdf_url}'}), 400
+
+        with open("temp.pdf", "wb") as f:
+            f.write(pdf_response.content)
+
+        clauses = extract_clauses_from_pdf("temp.pdf")
+        if not clauses:
+            return jsonify({'error': 'No clauses extracted from PDF'}), 400
+
+        index = create_faiss_index(clauses)
+
+        answers = []
+        for question in questions:
+            top_clauses = get_top_k_clauses(question, clauses, index)
+            prompt = f"""You are a helpful assistant for insurance policy documents.
+Answer the question based **only** on the relevant policy clauses below. Be direct, accurate, and clear (1–2 lines). Avoid legal jargon.
+
+--- RELEVANT CLAUSES ---
+{chr(10).join(top_clauses)}
+
+--- QUESTION ---
 {question}
 
-Answer:"""
-    try:
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        return f"Error: {e}"
+--- ANSWER ---"""
 
-# Main HackRx endpoint
-@app.route('/hackrx/run', methods=['POST'])
-def run_hackrx():
-    data = request.get_json()
-    pdf_url = data.get('pdf_url') or data.get('documents')
-    questions = data.get('questions')
+            try:
+                response = gemini_model.generate_content(prompt)
+                answers.append(response.text.strip())
+            except Exception as e:
+                answers.append(f"Error: {str(e)}")
 
-    if not pdf_url or not questions:
-        return jsonify({"error": "Missing 'pdf_url' or 'questions'"}), 400
-
-    full_text = extract_text_from_pdf_url(pdf_url)
-    if not full_text:
-        return jsonify({"error": "Unable to extract text from the document"}), 400
-
-    chunks = chunk_text(full_text)
-    index, embeddings = create_faiss_index(chunks)
-
-    results = []
-    for question in questions:
-        top_chunks = get_top_k_chunks(question, chunks, embeddings, index, k=1)
-        matched_chunk = top_chunks[0] if top_chunks else ""
-        answer = ask_gemini(question, matched_chunk)
-        results.append({
-            "question": question,
-            "answer": answer,
-            "matched_clause": matched_chunk
+        return jsonify({
+            "answers": answers,
+            "response_time_seconds": round(time.time() - start_time, 2)
         })
 
-    return jsonify({"answers": results})
+    except Exception as e:
+        return jsonify({'error': f"Server error: {str(e)}"}), 500
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
 
 
 
